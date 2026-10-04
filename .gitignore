@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+
+# runtime state & media
+data/
+out/
+work/
+secrets/
+.env
+config/settings.yaml
+config/creators.yaml
+cookies.txt

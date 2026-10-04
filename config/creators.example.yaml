@@ -1,0 +1,74 @@
+# Creators the Scout watches — copy to config/creators.yaml (`clipfactory init` does this)
+#
+# priority:   1 = check first / prefer when ranking, 3 = filler
+# permission: granted | program | open | unverified
+#   granted  = they (or their team) said yes
+#   program  = they run a public clipping program (Whop Content Rewards, Discord clip bounties, ...)
+#   open     = publicly encourages fan clips
+#   unverified = not checked yet
+#   Set discovery.require_permission: true in settings.yaml to only clip granted/program/open creators.
+# sources:    any mix of youtube (@handle or UC... channel id), twitch (login), kick (slug)
+# facecam:    optional fixed facecam box as fractions of the frame {x, y, w, h}; leave out to auto-detect
+#
+# Starter list of big GTA / GTA RP creators. Handles are best-effort — run `clipfactory doctor`
+# to check each one resolves, and edit freely. GTA 6 launches Nov 19 2026: expect every major
+# streamer to play it, so add the ones your audience follows.
+
+creators:
+  - name: xQc
+    priority: 1
+    permission: unverified
+    credit: "@xqc"
+    sources:
+      - {platform: kick, id: xqc}
+      - {platform: twitch, id: xqc}
+      - {platform: youtube, id: "@xQcOW"}
+
+  - name: Kai Cenat
+    priority: 1
+    permission: unverified
+    credit: "@kaicenat"
+    sources:
+      - {platform: twitch, id: kaicenat}
+
+  - name: summit1g
+    priority: 1
+    permission: unverified
+    credit: "@summit1g"
+    sources:
+      - {platform: twitch, id: summit1g}
+
+  - name: Buddha
+    priority: 2
+    permission: unverified
+    credit: "@buddha"
+    sources:
+      - {platform: kick, id: buddha}
+
+  - name: CaseOh
+    priority: 2
+    permission: unverified
+    credit: "@caseoh"
+    sources:
+      - {platform: twitch, id: caseoh_}
+
+  - name: IShowSpeed
+    priority: 2
+    permission: unverified
+    credit: "@ishowspeed"
+    sources:
+      - {platform: youtube, id: "@IShowSpeed"}
+
+  - name: Typical Gamer
+    priority: 2
+    permission: unverified
+    credit: "@typicalgamer"
+    sources:
+      - {platform: youtube, id: "@TypicalGamer"}
+
+  - name: MrBossFTW
+    priority: 3
+    permission: unverified
+    credit: "@mrbossftw"
+    sources:
+      - {platform: youtube, id: "@MrBossFTW"}

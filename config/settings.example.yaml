@@ -1,0 +1,128 @@
+# clipfactory settings — copy to config/settings.yaml (`clipfactory init` does this for you)
+
+timezone: America/New_York
+
+# ---------------------------------------------------------------- the daily quota
+clips_per_day: 3
+post_times: ["12:00", "17:00", "21:00"]   # local time, one clip per slot
+buffer_clips: 2              # keep this many extra approved clips ready beyond today's slots
+max_clip_age_hours: 72       # don't post moments older than this (clips go stale fast)
+min_minutes_between_posts: 90  # when catching up on missed slots
+
+# ---------------------------------------------------------------- what counts as GTA content
+games:                       # Twitch / Kick category names
+  - Grand Theft Auto VI
+  - Grand Theft Auto V
+keywords:                    # used for YouTube titles (no categories there) + fallback matching
+  - gta
+  - gta 6
+  - gta vi
+  - gta6
+  - gta rp
+  - nopixel
+  - vice city
+  - leonida
+  - los santos
+  - grand theft auto
+
+# ---------------------------------------------------------------- Scout
+discovery:
+  interval_hours: 3          # how often to look for new uploads/VODs
+  lookback_hours: 48         # only consider uploads/VODs from the last N hours
+  twitch_category_scan: true # also scan top GTA clips on Twitch (only for creators in creators.yaml unless creator_policy: open)
+  creator_policy: allowlist  # allowlist | open
+  require_permission: false  # true = only clip creators marked permission: granted / program in creators.yaml
+  min_source_minutes: 4      # skip shorts / tiny uploads
+  max_source_hours: 14
+
+# ---------------------------------------------------------------- Analyst
+analysis:
+  candidates_per_source: 8   # signal peaks sent to Claude per video/VOD
+  window_seconds: 80         # length of each candidate window around a peak
+  min_clip_seconds: 15
+  target_clip_seconds: 35    # viral median is ~40s; tight beats long
+  max_clip_seconds: 58       # stay under 60s so every platform treats it as a Short/Reel
+  min_virality_score: 65     # Claude's 0-100 score; below this never gets posted
+  max_clips_per_source: 2
+  max_clips_per_creator_per_day: 2
+  skip_stream_start_seconds: 240   # "starting soon" screens
+  chat_replay: auto          # auto | gql | off   (Twitch chat velocity signal)
+  chat_delay_seconds: 7      # chat reacts a few seconds after the moment
+  judge_frames: 4            # frames per candidate shown to Claude (0 = transcript only)
+  whisper_model: small       # tiny | base | small | medium | large-v3
+  language: en               # null = auto-detect
+  signal_weights:
+    community_clips: 0.40
+    heatmap: 0.35
+    chat: 0.25
+    audio: 0.20
+
+# ---------------------------------------------------------------- Editor
+edit:
+  layout: auto               # auto | facecam_split | blur_fill | center_crop
+  detect_facecam: true       # ask Claude to find the facecam box once per creator
+  gameplay_zoom: 1.18        # blur_fill: enlarge gameplay a bit past full width
+  fps: 30
+  crf: 20
+  caption_font: Montserrat Black
+  caption_size: 92
+  caption_words_per_chunk: 3
+  caption_uppercase: true
+  caption_color: "#FFFFFF"
+  caption_highlight: "#FFE400"
+  hook_font: Montserrat Black
+  hook_size: 64
+  hook_seconds: 0            # 0 = keep the hook banner on screen for the whole clip
+  credit: true               # small "xQc • Kick" credit on screen
+  target_lufs: -14
+
+# ---------------------------------------------------------------- Copywriter
+brand:
+  page_name: GTA 6 Moments
+  cta: Follow for daily GTA 6 clips
+  base_hashtags: ["#gta6", "#gta", "#gtavi", "#gaming", "#gtarp"]
+  hashtags_min: 8
+  hashtags_max: 12
+
+# ---------------------------------------------------------------- Quality control
+qc:
+  approval: auto             # auto = QC-passed clips post themselves; manual = wait for `clipfactory approve`
+  require_captions: true
+  llm_review: true
+
+# ---------------------------------------------------------------- Publisher
+platforms:
+  local:
+    enabled: true            # always drops a ready-to-post folder in out/ready/
+    dir: out/ready
+  youtube:
+    enabled: false
+    privacy: public          # unverified Google API projects are forced to private until audited
+    category_id: "20"        # Gaming
+  instagram:
+    enabled: false
+    api_host: graph.facebook.com   # or graph.instagram.com (Instagram Login tokens)
+    api_version: v23.0
+    share_to_feed: true
+  tiktok:
+    enabled: false
+    mode: direct             # direct = publish now; inbox = send to TikTok drafts for a 1-tap post
+    privacy: PUBLIC_TO_EVERYONE  # unaudited apps are forced to SELF_ONLY
+
+# ---------------------------------------------------------------- Claude
+llm:
+  model: claude-opus-5-5
+  effort_judge: medium
+  effort_copy: low
+  effort_qc: low
+
+# ---------------------------------------------------------------- downloads
+download:
+  max_height: 1080
+  cookies_from_browser: null # e.g. chrome / firefox / safari — helps when YouTube asks "confirm you're not a bot"
+  cookiefile: null           # or a Netscape cookies.txt path
+
+paths:
+  data: data
+  work: work
+  out: out
