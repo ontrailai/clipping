@@ -127,8 +127,12 @@ def analyze_source(cfg: Config, db: DB, claude: Claude, source: dict) -> list[in
     try:
         verdicts = judge.judge(claude, cfg, source, candidates)
     except LLMError as e:
-        logger.warning("judge failed: %s", e)
-        return []  # leave source as 'new' so the next tick retries
+        attempts = int(db.kv_get(f"judge_attempts:{sid}", "0")) + 1
+        db.kv_set(f"judge_attempts:{sid}", str(attempts))
+        logger.warning("judge failed (attempt %d/3): %s", attempts, e)
+        if attempts >= 3:
+            db.update("sources", sid, status="failed", error=f"judge: {e}")
+        return []  # otherwise leave source as 'new' so a later tick retries
 
     keepers = []
     for v in verdicts:

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Keeps the clip factory running on a Mac, restarting it after crashes and at login.
+  1. Replace /Users/YOU/clipping with your clone path (3 places).
+  2. cp deploy/macos/com.clipfactory.daemon.plist ~/Library/LaunchAgents/
+  3. launchctl load ~/Library/LaunchAgents/com.clipfactory.daemon.plist
+  Logs: /Users/YOU/clipping/data/factory.log
+  Tip: System Settings → Battery → prevent sleeping when the display is off, or the Mac will nap through post times.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.clipfactory.daemon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YOU/clipping/.venv/bin/clipfactory</string>
+    <string>daemon</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/YOU/clipping</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CLIPFACTORY_HOME</key><string>/Users/YOU/clipping</string>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict>
+</plist>

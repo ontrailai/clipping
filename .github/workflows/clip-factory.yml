@@ -1,0 +1,99 @@
+# Optional cloud runner: GitHub Actions runs `clipfactory tick` every 30 minutes.
+#
+# Before enabling (Actions → this workflow → Enable):
+#  0. Set the repository variable CLIPFACTORY_ENABLED=true (Settings → Secrets and variables → Actions → Variables).
+#  1. Commit your config/settings.yaml + config/creators.yaml (remove them from .gitignore — they hold no secrets),
+#     or edit the *.example.yaml files.
+#  2. Add repository secrets: ANTHROPIC_API_KEY, TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET,
+#     IG_USER_ID, IG_ACCESS_TOKEN, and optionally YOUTUBE_TOKEN_JSON (contents of secrets/youtube_token.json),
+#     TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET, TIKTOK_TOKEN_JSON, YTDLP_COOKIES (cookies.txt contents;
+#     also set download.cookiefile: cookies.txt in settings.yaml).
+#  Note: GitHub pauses scheduled workflows after 60 days without commits — push something occasionally.
+#  3. Heads-up: YouTube often blocks downloads from GitHub's datacenter IPs. Twitch and Kick work fine.
+#     If YouTube sources matter to you, run the factory on your own computer or a VPS instead.
+#
+# State (database + queued clips) is carried between runs with the Actions cache.
+# Tokens are written from secrets on every run and never cached.
+
+name: clip-factory
+
+on:
+  schedule:
+    - cron: "7,37 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: clip-factory
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    if: vars.CLIPFACTORY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install clipfactory
+        run: pip install -e ".[all]"
+
+      - name: Restore factory state
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data
+            out
+            work
+            ~/.cache/huggingface
+          key: factory-state-${{ github.run_id }}
+          restore-keys: factory-state-
+
+      - name: Write credentials
+        env:
+          YOUTUBE_TOKEN_JSON: ${{ secrets.YOUTUBE_TOKEN_JSON }}
+          TIKTOK_TOKEN_JSON: ${{ secrets.TIKTOK_TOKEN_JSON }}
+          YTDLP_COOKIES: ${{ secrets.YTDLP_COOKIES }}
+        run: |
+          mkdir -p secrets
+          [ -n "$YOUTUBE_TOKEN_JSON" ] && printf '%s' "$YOUTUBE_TOKEN_JSON" > secrets/youtube_token.json || true
+          [ -n "$TIKTOK_TOKEN_JSON" ] && printf '%s' "$TIKTOK_TOKEN_JSON" > secrets/tiktok_token.json || true
+          [ -n "$YTDLP_COOKIES" ] && printf '%s' "$YTDLP_COOKIES" > cookies.txt || true
+
+      - name: Tick
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TWITCH_CLIENT_ID: ${{ secrets.TWITCH_CLIENT_ID }}
+          TWITCH_CLIENT_SECRET: ${{ secrets.TWITCH_CLIENT_SECRET }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          TIKTOK_CLIENT_KEY: ${{ secrets.TIKTOK_CLIENT_KEY }}
+          TIKTOK_CLIENT_SECRET: ${{ secrets.TIKTOK_CLIENT_SECRET }}
+        run: clipfactory tick
+
+      - name: Upload today's clips
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ready-${{ github.run_id }}
+          path: out/ready
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Save factory state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data
+            out
+            work
+            ~/.cache/huggingface
+          key: factory-state-${{ github.run_id }}

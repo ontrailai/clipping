@@ -10,7 +10,10 @@ Run it from cron/Task Scheduler/GitHub Actions, or `clipfactory daemon` to loop 
 
 from __future__ import annotations
 
+import os
+import shutil
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from . import analyst, copywriter, editor, log, publisher, qc, scheduler, scout
 from .analyst import transcript
@@ -40,6 +43,7 @@ class Producer:
             summary["produced"] = self.produce(want)
         self.retry_failed_posts(now)
         summary["posted"] = self.publish_due(now)
+        self.cleanup(now)
         return summary
 
     def discovery_due(self, now: datetime) -> bool:
@@ -69,6 +73,26 @@ class Producer:
             if p and p < stale:
                 self.db.update("sources", s["id"], status="skipped", error="stale")
 
+    def cleanup(self, now: datetime) -> None:
+        """Delete media we no longer need: finished clips, ready-folders and work dirs past keep_files_days."""
+        cutoff = now - timedelta(days=self.cfg["keep_files_days"])
+        for clip in self.db.all("SELECT * FROM clips WHERE status IN ('published','expired','rejected','failed')"):
+            created = parse_iso(clip["created_at"])
+            if created and created < cutoff:
+                for f in (clip["path"], clip["cover_path"], str(Path(clip["path"]).with_suffix(".ass"))):
+                    if f:
+                        Path(f).unlink(missing_ok=True)
+        roots = [self.cfg.path("work")]
+        ready = Path(self.cfg["platforms"]["local"].get("dir", "out/ready"))
+        roots.append(ready if ready.is_absolute() else self.cfg.home / ready)
+        busy = {f"src_{r['source_id']}" for r in self.db.all("SELECT DISTINCT source_id FROM moments WHERE status = 'selected'")}
+        for root in roots:
+            if not root.exists():
+                continue
+            for d in root.iterdir():
+                if d.is_dir() and d.name not in busy and datetime.fromtimestamp(d.stat().st_mtime, timezone.utc) < cutoff:
+                    shutil.rmtree(d, ignore_errors=True)
+
     def _source_for_clip(self, clip: dict) -> dict | None:
         return self.db.one(
             "SELECT s.* FROM sources s JOIN moments m ON m.source_id = s.id WHERE m.id = ?", [clip["moment_id"]]
@@ -77,6 +101,9 @@ class Producer:
     # ------------------------------------------------------------------ production
     def produce(self, want: int) -> int:
         made = 0
+        if not _claude_credentials():
+            logger.error("no Claude credentials (ANTHROPIC_API_KEY) — the Analyst can't judge clips; skipping production")
+            return 0
         for clip in self.db.clips("rendered"):  # rendered earlier but QC couldn't run
             if made >= want:
                 return made
@@ -247,6 +274,11 @@ class Producer:
             self.db.update("sources", row["id"], status="new")
             sid = row["id"]
         return sid
+
+
+def _claude_credentials() -> bool:
+    return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")
+                or (Path.home() / ".config" / "anthropic").exists())
 
 
 def _twitch_meta(video_id: str) -> dict:

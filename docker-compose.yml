@@ -1,0 +1,9 @@
+# docker compose up -d   → the factory runs 24/7 on any VPS / home server
+# First time: docker compose run --rm clipfactory clipfactory init
+# then edit ./factory/.env and ./factory/config/*.yaml
+services:
+  clipfactory:
+    build: .
+    restart: unless-stopped
+    volumes:
+      - ./factory:/data

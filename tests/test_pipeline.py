@@ -59,6 +59,7 @@ def _tune(cfg):
 @needs_ffmpeg
 def test_full_pipeline(cfg, db, sample_video, monkeypatch):
     _tune(cfg)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
     heat = [{"start_time": i, "end_time": i + 1, "value": 1.0 if 20 <= i < 24 else 0.1} for i in range(40)]
     monkeypatch.setattr(fetch, "probe", lambda url, opts=None, flat=False: {
         "duration": 40, "title": "GTA 6 chaos stream", "heatmap": heat, "live_status": "was_live"})
@@ -111,3 +112,28 @@ def test_publish_due_picks_best_and_expires_old(cfg, db, monkeypatch):
     assert db.clip(clips["stale"])["status"] == "expired"
     monkeypatch.setattr(p, "post", lambda clip, slot: (clip["id"], slot))
     assert p.publish_due(now) == (clips["fresh"], "2026-11-19T12:00")
+
+
+def test_produce_skips_without_claude_credentials(cfg, db, monkeypatch, tmp_path):
+    from clipfactory import producer as producer_mod
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.setattr(producer_mod.Path, "home", lambda: tmp_path)
+    db.add_source("youtube", "v", "xQc", "GTA 6", "u", iso(), 600, "video", {})
+    called = []
+    monkeypatch.setattr(producer_mod.analyst, "analyze_source", lambda *a: called.append(1) or [])
+    assert Producer(cfg, db, FakeClaude()).produce(3) == 0
+    assert not called
+
+
+def test_cleanup_removes_old_finished_media(cfg, db):
+    old = datetime.now(timezone.utc) + timedelta(days=30)
+    clip_file = cfg.path("out") / "clips" / "old.mp4"
+    clip_file.parent.mkdir(parents=True, exist_ok=True)
+    clip_file.write_bytes(b"x")
+    sid = db.add_source("twitch", "9", "xQc", "t", "u", iso(), 9000, "vod", {})
+    cid = db.add_clip(db.add_moment(sid, 0, 60, {}), "xQc", str(clip_file), None, 30, 80)
+    db.update("clips", cid, status="published")
+    Producer(cfg, db, FakeClaude()).cleanup(old)
+    assert not clip_file.exists()

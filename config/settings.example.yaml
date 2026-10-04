@@ -8,6 +8,7 @@ post_times: ["12:00", "17:00", "21:00"]   # local time, one clip per slot
 buffer_clips: 2              # keep this many extra approved clips ready beyond today's slots
 max_clip_age_hours: 72       # don't post moments older than this (clips go stale fast)
 min_minutes_between_posts: 90  # when catching up on missed slots
+keep_files_days: 4           # delete rendered/posted media older than this (keeps the disk clean)
 
 # ---------------------------------------------------------------- what counts as GTA content
 games:                       # Twitch / Kick category names

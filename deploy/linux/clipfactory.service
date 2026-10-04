@@ -1,0 +1,18 @@
+# systemd user service:
+#   mkdir -p ~/.config/systemd/user && cp deploy/linux/clipfactory.service ~/.config/systemd/user/
+#   edit the paths below, then:
+#   systemctl --user daemon-reload && systemctl --user enable --now clipfactory
+#   loginctl enable-linger $USER     # keep running after you log out
+[Unit]
+Description=GTA 6 clip factory
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/clipping
+Environment=CLIPFACTORY_HOME=%h/clipping
+ExecStart=%h/clipping/.venv/bin/clipfactory daemon
+Restart=always
+RestartSec=60
+
+[Install]
+WantedBy=default.target
