@@ -12,14 +12,18 @@ from __future__ import annotations
 
 import os
 import shutil
+import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from . import analyst, copywriter, editor, log, publisher, qc, scheduler, scout
 from .analyst import transcript
 from .config import Config
 from .db import DB, iso, loads, parse_iso
-from .llm import Claude, LLMError
+from .llm import Claude, LLMError, LLMRefusal
+from .publisher import AuthError, PublishPending
 
 logger = log.get("producer")
 
@@ -34,16 +38,23 @@ class Producer:
     def tick(self, now: datetime | None = None) -> dict:
         now = now or datetime.now(timezone.utc)
         summary = {"discovered": 0, "produced": 0, "posted": None}
-        if self.discovery_due(now):
-            summary["discovered"] = scout.discover(self.cfg, self.db)
-        self.expire(now)
-        want = self.needed(now)
-        if want > 0:
-            logger.info("queue needs %d more clip(s)", want)
-            summary["produced"] = self.produce(want)
-        self.retry_failed_posts(now)
-        summary["posted"] = self.publish_due(now)
-        self.cleanup(now)
+        try:
+            with tick_lock(self.cfg.path("data") / "tick.lock"):
+                if self.discovery_due(now):
+                    summary["discovered"] = scout.discover(self.cfg, self.db)
+                self.expire(now)
+                self.follow_up_posts(now)
+                summary["posted"] = self.publish_due(now)  # post first: production can take an hour
+                want = self.needed(now)
+                if want > 0:
+                    logger.info("queue needs %d more clip(s)", want)
+                    summary["produced"] = self.produce(want)
+                if summary["posted"] is None:
+                    summary["posted"] = self.publish_due(datetime.now(timezone.utc))
+                self.cleanup(now)
+        except TickBusy:
+            logger.info("another tick is still running — skipping")
+            summary["skipped"] = True
         return summary
 
     def discovery_due(self, now: datetime) -> bool:
@@ -61,7 +72,7 @@ class Producer:
 
     def expire(self, now: datetime) -> None:
         max_age = timedelta(hours=self.cfg["max_clip_age_hours"])
-        for clip in self.db.clips("approved") + self.db.clips("pending_review"):
+        for clip in self.db.clips("approved") + self.db.clips("pending_review") + self.db.clips("rendered"):
             src = self._source_for_clip(clip)
             published = parse_iso(src.get("published_at")) if src else None
             if published and now - published > max_age:
@@ -107,7 +118,7 @@ class Producer:
         for clip in self.db.clips("rendered"):  # rendered earlier but QC couldn't run
             if made >= want:
                 return made
-            made += 1 if self.finish(clip["id"]) in ("approved", "pending_review") else 0
+            made += self._safe_finish(clip["id"])
         for m in self.db.all("SELECT * FROM moments WHERE status = 'selected' ORDER BY score DESC"):
             if made >= want:
                 return made
@@ -136,10 +147,22 @@ class Producer:
         return made
 
     def _render_and_finish(self, moment: dict) -> int:
-        clip_id = editor.render_moment(self.cfg, self.db, self.claude, moment)
-        if not clip_id:
+        """Never lets one bad moment crash the tick (and block posting)."""
+        try:
+            clip_id = editor.render_moment(self.cfg, self.db, self.claude, moment)
+        except Exception as e:
+            logger.exception("render crashed on moment %s", moment["id"])
+            self.db.update("moments", moment["id"], status="failed", error=str(e)[:500])
             return 0
-        return 1 if self.finish(clip_id) in ("approved", "pending_review") else 0
+        return self._safe_finish(clip_id) if clip_id else 0
+
+    def _safe_finish(self, clip_id: int) -> int:
+        try:
+            return 1 if self.finish(clip_id) in ("approved", "pending_review") else 0
+        except Exception as e:
+            logger.exception("copy/QC crashed on clip %s", clip_id)
+            self.db.update("clips", clip_id, status="failed", qc={"passed": False, "issues": [str(e)[:300]]})
+            return 0
 
     def finish(self, clip_id: int) -> str:
         """Copywriter + QC for a rendered clip; returns its new status."""
@@ -160,8 +183,12 @@ class Producer:
                                        title_fallback=moment.get("title") or "")
         try:
             report = qc.run(self.claude, self.cfg, clip, moment, copy, words, said)
+        except LLMRefusal as e:
+            report = {"passed": False, "issues": [f"QC reviewer declined: {e}"]}
         except LLMError as e:
-            report = {"passed": False, "issues": [f"QC reviewer unavailable: {e}"], "retry": True}
+            attempts = int(self.db.kv_get(f"qc_attempts:{clip_id}", "0")) + 1
+            self.db.kv_set(f"qc_attempts:{clip_id}", str(attempts))
+            report = {"passed": False, "issues": [f"QC reviewer unavailable ({attempts}/3): {e}"], "retry": attempts < 3}
 
         if report["passed"]:
             status = "approved" if self.cfg["qc"]["approval"] == "auto" else "pending_review"
@@ -201,15 +228,15 @@ class Producer:
         logger.info("posting clip #%s for slot %s", clip["id"], slot)
         copy = loads(clip["copy"], {})
         pubs = publisher.enabled(self.cfg)
-        done = {p["platform"] for p in self.db.posts_for(clip["id"]) if p["status"] == "published"}
-        social_ok = False
+        done = {p["platform"] for p in self.db.posts_for(clip["id"]) if p["status"] in ("published", "pending")}
+        social_ok, real_failures = False, 0
         for pub in pubs:
             if pub.name in done:
                 social_ok |= pub.name != "local"
                 continue
             ok, why = pub.ready()
             if not ok:
-                logger.warning("%s not ready: %s", pub.name, why)
+                logger.error("%s not connected: %s", pub.name, why)
                 self.db.record_post(clip["id"], pub.name, "failed", error=why)
                 continue
             try:
@@ -217,63 +244,128 @@ class Producer:
                 self.db.record_post(clip["id"], pub.name, "published", res.remote_id, res.url)
                 logger.info("%s ✓ %s", pub.name, res.url or res.remote_id or "")
                 social_ok |= pub.name != "local"
+            except PublishPending as e:  # uploaded; the platform is still processing — check later, never re-upload
+                self.db.record_post(clip["id"], pub.name, "pending", remote_id=e.remote_id, error=str(e))
+                logger.info("%s … still processing (%s)", pub.name, e.remote_id)
+                social_ok |= pub.name != "local"
+            except AuthError as e:  # a login problem isn't the clip's fault: don't burn the clip
+                self.db.record_post(clip["id"], pub.name, "failed", error=str(e)[:500])
+                logger.error("%s login problem: %s", pub.name, e)
             except Exception as e:
                 self.db.record_post(clip["id"], pub.name, "failed", error=str(e)[:500])
                 logger.warning("%s ✗ %s", pub.name, e)
+                real_failures += 1
 
         social = [p for p in pubs if p.name != "local"]
         if social_ok or not social:
             self.db.update("clips", clip["id"], status="published", published_at=iso())
             self.db.fill_slot(slot, clip["id"])
             return clip["id"]
-        attempts = int(self.db.kv_get(f"attempts:{clip['id']}", "0")) + 1
-        self.db.kv_set(f"attempts:{clip['id']}", str(attempts))
-        if attempts >= 3:
-            self.db.update("clips", clip["id"], status="failed")
+        if real_failures:
+            attempts = int(self.db.kv_get(f"attempts:{clip['id']}", "0")) + 1
+            self.db.kv_set(f"attempts:{clip['id']}", str(attempts))
+            if attempts >= 3:
+                self.db.update("clips", clip["id"], status="failed")
         return None
 
-    def retry_failed_posts(self, now: datetime) -> None:
-        """A clip that went out on some platforms but failed on others gets two more tries."""
-        since = iso(now - timedelta(hours=6))
+    def follow_up_posts(self, now: datetime) -> None:
+        """Finish uploads that were still processing, and give platforms that failed two more tries."""
+        since = iso(now - timedelta(hours=24))
         rows = self.db.all(
-            "SELECT p.*, c.path FROM posts p JOIN clips c ON c.id = p.clip_id"
-            " WHERE p.status = 'failed' AND c.status = 'published' AND c.published_at >= ?", [since],
+            "SELECT p.* FROM posts p JOIN clips c ON c.id = p.clip_id"
+            " WHERE p.status IN ('failed', 'pending') AND c.status = 'published' AND c.published_at >= ?", [since],
         )
         pubs = {p.name: p for p in publisher.enabled(self.cfg)}
         for row in rows:
             pub = pubs.get(row["platform"])
-            key = f"retry:{row['clip_id']}:{row['platform']}"
-            tries = int(self.db.kv_get(key, "0"))
-            if not pub or tries >= 2 or not pub.ready()[0]:
+            if not pub or not pub.ready()[0]:
                 continue
-            self.db.kv_set(key, str(tries + 1))
             clip = self.db.clip(row["clip_id"])
             try:
-                res = pub.publish(clip, loads(clip["copy"], {}), "retry")
+                if row["status"] == "pending":
+                    res = pub.check(row["remote_id"])
+                else:
+                    key = f"retry:{row['clip_id']}:{row['platform']}"
+                    tries = int(self.db.kv_get(key, "0"))
+                    if tries >= 2:
+                        continue
+                    self.db.kv_set(key, str(tries + 1))
+                    res = pub.publish(clip, loads(clip["copy"], {}), "retry")
                 self.db.record_post(clip["id"], pub.name, "published", res.remote_id, res.url)
-                logger.info("retry %s ✓ clip #%s", pub.name, clip["id"])
+                logger.info("%s ✓ clip #%s (follow-up)", pub.name, clip["id"])
+            except PublishPending as e:
+                self.db.record_post(clip["id"], pub.name, "pending", remote_id=e.remote_id, error=str(e))
             except Exception as e:
-                self.db.record_post(clip["id"], pub.name, "failed", error=str(e)[:500])
+                self.db.record_post(clip["id"], pub.name, "failed", remote_id=row["remote_id"], error=str(e)[:500])
 
     # ------------------------------------------------------------------ one-offs
     def add_url(self, url: str, creator: str | None = None) -> int | None:
         """Queue any YouTube/Twitch/Kick URL by hand (bypasses discovery filters)."""
-        platform = "youtube" if ("youtube.com" in url or "youtu.be" in url) else \
-                   "twitch" if "twitch.tv" in url else "kick" if "kick.com" in url else "other"
-        ext = url.rstrip("/").split("/")[-1].split("v=")[-1].split("&")[0]
+        platform, ext, canonical, slug = parse_video_url(url)
         meta: dict = {}
         if platform == "twitch":
             try:
                 meta = _twitch_meta(ext)
             except Exception as e:
                 logger.info("no Twitch community clips for manual URL (%s)", e)
-        sid = self.db.add_source(platform, ext, creator or "unknown", "", url, iso(), None,
+        if not creator:
+            known = self.cfg.creator_for(platform, slug or meta.get("user_login", "")) if (slug or meta.get("user_login")) else None
+            creator = known.name if known else (meta.get("user_name") or slug or "unknown")
+        sid = self.db.add_source(platform, ext, creator, "", canonical, iso(), None,
                                  "vod" if platform in ("twitch", "kick") else "video", meta)
         if sid is None:
             row = self.db.one("SELECT id FROM sources WHERE platform = ? AND external_id = ?", [platform, ext])
             self.db.update("sources", row["id"], status="new")
             sid = row["id"]
         return sid
+
+
+def parse_video_url(url: str) -> tuple[str, str, str, str | None]:
+    """URL -> (platform, external id, canonical url, channel slug if known). Query strings are dropped."""
+    u = urlparse(url.strip())
+    host = u.netloc.lower()
+    parts = [p for p in u.path.split("/") if p]
+    if "youtu.be" in host and parts:
+        vid = parts[0]
+        return "youtube", vid, f"https://www.youtube.com/watch?v={vid}", None
+    if "youtube.com" in host:
+        vid = parse_qs(u.query).get("v", [None])[0]
+        if not vid and len(parts) >= 2 and parts[0] in ("shorts", "live", "embed"):
+            vid = parts[1]
+        if vid:
+            return "youtube", vid, f"https://www.youtube.com/watch?v={vid}", None
+    if "twitch.tv" in host and "videos" in parts and parts.index("videos") + 1 < len(parts):
+        vid = parts[parts.index("videos") + 1]
+        return "twitch", vid, f"https://www.twitch.tv/videos/{vid}", None
+    if "kick.com" in host and len(parts) >= 3 and parts[1] == "videos":
+        return "kick", parts[2], f"https://kick.com/{parts[0]}/videos/{parts[2]}", parts[0]
+    return "other", (host + u.path).strip("/"), url, None
+
+
+class TickBusy(RuntimeError):
+    pass
+
+
+@contextmanager
+def tick_lock(path: Path, stale_after: float = 8 * 3600):
+    """Stops overlapping ticks (cron + a long production run) from double-posting a slot."""
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        try:
+            age = time.time() - path.stat().st_mtime
+        except FileNotFoundError:
+            age = stale_after
+        if age < stale_after:
+            raise TickBusy() from None
+        path.unlink(missing_ok=True)
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    os.write(fd, str(os.getpid()).encode())
+    os.close(fd)
+    try:
+        yield
+    finally:
+        path.unlink(missing_ok=True)
 
 
 def _claude_credentials() -> bool:
@@ -293,4 +385,4 @@ def _twitch_meta(video_id: str) -> dict:
     clips = [clip_summary(c) for c in tw.clips(broadcaster_id=vod["user_id"], started_at=created,
                                                  ended_at=created + timedelta(seconds=dur + 600))
              if c.get("video_id") == video_id and c.get("vod_offset") is not None]
-    return {"community_clips": clips}
+    return {"community_clips": clips, "user_login": vod.get("user_login"), "user_name": vod.get("user_name")}

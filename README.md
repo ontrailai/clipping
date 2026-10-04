@@ -53,11 +53,11 @@ Until a platform is enabled, every clip is still saved to `out/ready/<slot>_<cre
 | Platform | What you need | Gotchas |
 |---|---|---|
 | **Instagram Reels** | Instagram professional account + Meta app with `instagram_content_publish`; put `IG_USER_ID` + long-lived `IG_ACCESS_TOKEN` in `.env`. | Uploads the file directly (no hosting needed). ~50–100 API posts/day limit, so 3 is fine. Long-lived tokens last 60 days; refresh them. |
-| **TikTok** | App on [developers.tiktok.com](https://developers.tiktok.com) with Content Posting API → `.env` keys → `clipfactory auth tiktok`. | **Until TikTok audits your app, API posts are private (SELF_ONLY).** Meanwhile set `tiktok.mode: inbox`: clips land in your TikTok drafts and you post each with one tap (you can add a trending sound then). |
+| **TikTok** | App on [developers.tiktok.com](https://developers.tiktok.com) with Content Posting API → `.env` keys → `clipfactory auth tiktok`. | Default `mode: inbox`: clips land in your TikTok drafts and you post each with one tap (add a trending sound while you're there). **Until TikTok audits your app, direct posts are private**, so switch to `mode: direct` + `audited: true` only after approval. |
 | **YouTube Shorts** | Google Cloud project → YouTube Data API v3 → OAuth client (Desktop) → `secrets/youtube_client_secret.json` → `clipfactory auth youtube`. | Unverified API projects get uploads **locked to private** until Google's audit. Default quota allows ~6 uploads/day. |
 
 Each platform is independent. A clip counts as posted when at least one social platform accepts it.
-Failures are retried twice.
+Failures are retried twice. An expired login never burns clips: they wait in the queue until you reconnect.
 
 ## Where to run it
 
@@ -70,7 +70,8 @@ Failures are retried twice.
   you set the repo variable `CLIPFACTORY_ENABLED=true`. Read the header of that file first. Twitch/Kick work great there;
   YouTube downloads often get blocked from GitHub's IPs.
 
-Plain cron works too: `*/15 * * * * cd ~/clipping && .venv/bin/clipfactory tick`.
+Plain cron works too: `*/15 * * * * cd ~/clipping && .venv/bin/clipfactory tick`. A lock file stops overlapping
+ticks, so a long production run never double-posts.
 
 ## Commands
 

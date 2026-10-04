@@ -18,7 +18,8 @@ def session() -> requests.Session:
     global _session
     if _session is None:
         s = requests.Session()
-        retry = Retry(total=4, backoff_factor=1.5, status_forcelist=(429, 500, 502, 503, 504), allowed_methods=None)
+        # default allowed_methods = idempotent verbs only: a POST is never replayed (no double posts)
+        retry = Retry(total=4, backoff_factor=1.5, status_forcelist=(429, 500, 502, 503, 504))
         s.mount("https://", HTTPAdapter(max_retries=retry))
         s.mount("http://", HTTPAdapter(max_retries=retry))
         s.headers["User-Agent"] = UA

@@ -1,13 +1,15 @@
 """TikTok via the Content Posting API.
 
-mode: direct → posts immediately (needs video.publish; unaudited apps can only post SELF_ONLY)
-mode: inbox  → lands in the account's TikTok drafts/inbox for a one-tap post (needs video.upload)
+mode: inbox  → lands in the account's TikTok drafts/inbox for a one-tap post (needs video.upload) — default
+mode: direct → posts immediately (needs video.publish). Until TikTok audits your app, posts are
+               forced to SELF_ONLY (private); set `audited: true` once the audit passes.
 
 Run `clipfactory auth tiktok` once; tokens refresh themselves after that.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -19,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from ..http import session
-from .base import PostResult, Publisher, PublishError
+from .base import AuthError, PostResult, Publisher, PublishError, PublishPending
 
 API = "https://open.tiktokapis.com/v2"
 SCOPES = "user.info.basic,video.publish,video.upload"
@@ -49,9 +51,13 @@ def _save(cfg, data: dict) -> None:
 def authorize(cfg) -> Path:
     key, secret, redirect = _client()
     state = secrets.token_urlsafe(16)
-    url = "https://www.tiktok.com/v2/auth/authorize/?" + urllib.parse.urlencode(
-        {"client_key": key, "scope": SCOPES, "response_type": "code", "redirect_uri": redirect, "state": state}
-    )
+    # PKCE (required for TikTok desktop apps; TikTok wants the SHA256 challenge hex-encoded)
+    verifier = secrets.token_urlsafe(64)[:64]
+    challenge = hashlib.sha256(verifier.encode()).hexdigest()
+    url = "https://www.tiktok.com/v2/auth/authorize/?" + urllib.parse.urlencode({
+        "client_key": key, "scope": SCOPES, "response_type": "code", "redirect_uri": redirect, "state": state,
+        "code_challenge": challenge, "code_challenge_method": "S256",
+    })
     code_holder: dict = {}
     parsed = urllib.parse.urlparse(redirect)
 
@@ -77,7 +83,7 @@ def authorize(cfg) -> Path:
         raise PublishError(f"TikTok authorization failed: {code_holder}")
     r = session().post(f"{API}/oauth/token/", data={
         "client_key": key, "client_secret": secret, "code": code_holder["code"],
-        "grant_type": "authorization_code", "redirect_uri": redirect,
+        "grant_type": "authorization_code", "redirect_uri": redirect, "code_verifier": verifier,
     }, headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=30)
     data = r.json()
     if "access_token" not in data:
@@ -105,7 +111,7 @@ class TikTokPublisher(Publisher):
             }, headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=30)
             fresh = r.json()
             if "access_token" not in fresh:
-                raise PublishError(f"TikTok token refresh failed: {fresh}")
+                raise AuthError(f"TikTok token refresh failed — run `clipfactory auth tiktok` ({fresh})")
             _save(self.cfg, fresh)
             data = fresh
         return data["access_token"]
@@ -117,7 +123,10 @@ class TikTokPublisher(Publisher):
         data = r.json()
         err = data.get("error") or {}
         if r.status_code >= 400 or err.get("code") not in (None, "ok"):
-            raise PublishError(f"tiktok {path}: {err or r.text[:300]}")
+            msg = f"tiktok {path}: {err or r.text[:300]}"
+            if r.status_code == 401 or err.get("code") in ("access_token_invalid", "scope_not_authorized", "scope_permission_missed"):
+                raise AuthError(msg)
+            raise PublishError(msg)
         return data.get("data") or {}
 
     def publish(self, clip: dict, copy: dict, slot_key: str) -> PostResult:
@@ -136,6 +145,8 @@ class TikTokPublisher(Publisher):
         else:
             info = self._post("/post/publish/creator_info/query/", token, {})
             wanted = self.settings.get("privacy", "PUBLIC_TO_EVERYONE")
+            if not self.settings.get("audited", False):
+                wanted = "SELF_ONLY"  # TikTok rejects anything else from apps that haven't passed the audit
             options = info.get("privacy_level_options") or [wanted]
             privacy = wanted if wanted in options else options[0]
             init = self._post("/post/publish/video/init/", token, {
@@ -163,14 +174,27 @@ class TikTokPublisher(Publisher):
                 if r.status_code not in (200, 201, 206):
                     raise PublishError(f"tiktok upload chunk {i} -> HTTP {r.status_code}")
 
-        deadline = time.time() + 900
-        while time.time() < deadline:
-            status = self._post("/post/publish/status/fetch/", token, {"publish_id": publish_id})
+        return self._wait(token, publish_id, timeout=900)
+
+    def _wait(self, token: str, publish_id: str, timeout: float) -> PostResult:
+        """Poll until TikTok finishes. Upload is already done, so any hiccup here means 'check later', never re-upload."""
+        deadline = time.time() + timeout
+        while True:
+            try:
+                status = self._post("/post/publish/status/fetch/", token, {"publish_id": publish_id})
+            except AuthError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                raise PublishPending(publish_id, f"status check failed: {e}") from e
             state = status.get("status")
             if state in ("PUBLISH_COMPLETE", "SEND_TO_USER_INBOX"):
                 ids = status.get("publicaly_available_post_id") or []
                 return PostResult(remote_id=str(ids[0]) if ids else publish_id, url=None)
             if state == "FAILED":
                 raise PublishError(f"tiktok publish failed: {status.get('fail_reason')}")
+            if time.time() > deadline:
+                raise PublishPending(publish_id)
             time.sleep(10)
-        raise PublishError("tiktok publish timed out")
+
+    def check(self, remote_id: str) -> PostResult:
+        return self._wait(self._token(), remote_id, timeout=0)

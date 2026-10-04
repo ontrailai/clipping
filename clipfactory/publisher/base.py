@@ -13,6 +13,18 @@ class PublishError(RuntimeError):
     pass
 
 
+class AuthError(PublishError):
+    """Login/token problem: fix the credentials; not the clip's fault."""
+
+
+class PublishPending(PublishError):
+    """Upload finished but the platform is still processing; check again later with check()."""
+
+    def __init__(self, remote_id: str, message: str = "still processing"):
+        super().__init__(message)
+        self.remote_id = remote_id
+
+
 class Publisher:
     name = "base"
 
@@ -26,3 +38,7 @@ class Publisher:
 
     def publish(self, clip: dict, copy: dict, slot_key: str) -> PostResult:
         raise NotImplementedError
+
+    def check(self, remote_id: str) -> PostResult:
+        """Resume a PublishPending upload."""
+        raise PublishError(f"{self.name} cannot resume uploads")

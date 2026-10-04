@@ -1,7 +1,7 @@
 """Twitch chat replay → reaction timeline.
 
-Uses TwitchDownloaderCLI when it's installed (fast, robust), otherwise Twitch's public
-GraphQL comments endpoint with a time budget. Either way, failure just means no chat signal.
+Uses TwitchDownloaderCLI when it's installed (full chat), otherwise samples Twitch's public
+GraphQL comments endpoint across the whole VOD. Either way, failure just means no chat signal.
 """
 
 from __future__ import annotations
@@ -12,6 +12,8 @@ import shutil
 import subprocess
 import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -27,6 +29,13 @@ COMMENTS_HASH = "b70a3591ff0f4e0313d126c6a1502d79a1c02baebb288227c582044aa76adf6
 
 FUNNY = {"lul", "lulw", "kekw", "omegalul", "icant", "lmao", "lmfao", "kekl", "pepelaugh", "xdd", "😂", "💀", "🤣", "haha", "hahaha", "dead", "lol"}
 HYPE = {"pog", "pogchamp", "poggers", "pagman", "pogu", "holy", "w", "clip", "clipit", "noway", "wtf", "monkas", "monkaw", "😱", "🔥", "goat", "insane", "omg", "sheesh"}
+
+
+@dataclass
+class ChatData:
+    messages: list[tuple[float, str]]
+    rate: np.ndarray       # weighted chat activity per second
+    coverage: np.ndarray   # seconds where we actually have chat data
 
 
 def classify(text: str) -> tuple[float, str | None]:
@@ -58,53 +67,64 @@ def _via_cli(video_id: str, work: Path) -> list[tuple[float, str]] | None:
     return [(float(c["content_offset_seconds"]), c.get("message", {}).get("body", "")) for c in data.get("comments", [])]
 
 
-def _via_gql(video_id: str, budget_seconds: float) -> list[tuple[float, str]]:
+def _gql_page(video_id: str, offset: int) -> list[tuple[float, str]]:
+    payload = [{
+        "operationName": "VideoCommentsByOffsetOrCursor",
+        "variables": {"videoID": video_id, "contentOffsetSeconds": offset},
+        "extensions": {"persistedQuery": {"version": 1, "sha256Hash": COMMENTS_HASH}},
+    }]
+    r = session().post(GQL, json=payload, headers={"Client-Id": WEB_CLIENT_ID}, timeout=20)
+    r.raise_for_status()
+    body = r.json()
+    body = body[0] if isinstance(body, list) else body
+    if body.get("errors"):
+        raise RuntimeError(body["errors"][0].get("message", "gql error"))
+    comments = (((body.get("data") or {}).get("video") or {}).get("comments") or {})
+    out = []
+    for edge in comments.get("edges") or []:
+        node = edge.get("node") or {}
+        frags = (node.get("message") or {}).get("fragments") or []
+        out.append((float(node.get("contentOffsetSeconds", 0)), "".join(f.get("text", "") for f in frags)))
+    return out
+
+
+def _via_gql_sampled(video_id: str, duration: int, step: int = 20, workers: int = 8,
+                     budget_seconds: float = 240, page=_gql_page) -> ChatData:
+    """Sample one comments page every `step` seconds across the whole VOD (offset paging, like
+    TwitchDownloader). Each page gives a local chat rate, so even a 10-hour stream is covered evenly."""
+    rate = np.zeros(duration)
+    coverage = np.zeros(duration, dtype=bool)
     messages: list[tuple[float, str]] = []
-    cursor = None
+    offsets = list(range(0, duration, step))
     deadline = time.time() + budget_seconds
-    while time.time() < deadline:
-        variables = {"videoID": video_id}
-        if cursor:
-            variables["cursor"] = cursor
-        else:
-            variables["contentOffsetSeconds"] = 0
-        payload = [{
-            "operationName": "VideoCommentsByOffsetOrCursor",
-            "variables": variables,
-            "extensions": {"persistedQuery": {"version": 1, "sha256Hash": COMMENTS_HASH}},
-        }]
-        r = session().post(GQL, json=payload, headers={"Client-Id": WEB_CLIENT_ID}, timeout=20)
-        r.raise_for_status()
-        body = r.json()
-        body = body[0] if isinstance(body, list) else body
-        if body.get("errors"):
-            raise RuntimeError(body["errors"][0].get("message", "gql error"))
-        comments = (((body.get("data") or {}).get("video") or {}).get("comments") or {})
-        edges = comments.get("edges") or []
-        for edge in edges:
-            node = edge.get("node") or {}
-            frags = (node.get("message") or {}).get("fragments") or []
-            messages.append((float(node.get("contentOffsetSeconds", 0)), "".join(f.get("text", "") for f in frags)))
-        if not edges or not (comments.get("pageInfo") or {}).get("hasNextPage"):
-            break
-        cursor = edges[-1].get("cursor")
-        if not cursor:
-            break
-    return messages
+    errors = 0
 
+    def work(t: int):
+        if time.time() > deadline:
+            return t, None
+        try:
+            return t, page(video_id, t)
+        except Exception as e:  # noqa: BLE001
+            return t, e
 
-def fetch_messages(video_id: str, work: Path, mode: str = "auto", budget_seconds: float = 180) -> list[tuple[float, str]]:
-    if mode == "off":
-        return []
-    try:
-        msgs = _via_cli(video_id, work) if mode == "auto" else None
-        if msgs is None:
-            msgs = _via_gql(video_id, budget_seconds)
-        logger.info("chat replay: %d messages", len(msgs))
-        return msgs
-    except Exception as e:
-        logger.warning("chat replay unavailable (%s) — continuing without chat signal", e)
-        return []
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for t, result in pool.map(work, offsets):
+            if result is None:
+                continue
+            if isinstance(result, Exception):
+                errors += 1
+                if errors > 10 and errors > len(offsets) // 4:
+                    raise result
+                continue
+            end = min(duration, t + step)
+            coverage[t:end] = True
+            inside = [(o, m) for o, m in result if o >= t]
+            if not inside:
+                continue
+            span = max(1.0, inside[-1][0] - t + 1)
+            rate[t:end] = sum(classify(m)[0] for _, m in inside) / span
+            messages.extend(x for x in inside if x[0] < end)
+    return ChatData(messages, rate, coverage)
 
 
 def timeline(messages: list[tuple[float, str]], duration: int) -> np.ndarray:
@@ -114,6 +134,23 @@ def timeline(messages: list[tuple[float, str]], duration: int) -> np.ndarray:
         if 0 <= i < duration:
             x[i] += classify(text)[0]
     return x
+
+
+def fetch(video_id: str, duration: int, work: Path, mode: str = "auto") -> ChatData | None:
+    """Full chat via TwitchDownloaderCLI when available, otherwise a sampled GQL scan. None = no chat signal."""
+    if mode == "off":
+        return None
+    try:
+        msgs = _via_cli(video_id, work) if mode == "auto" else None
+        if msgs is not None:
+            data = ChatData(msgs, timeline(msgs, duration), np.ones(duration, dtype=bool))
+        else:
+            data = _via_gql_sampled(video_id, duration)
+        logger.info("chat replay: %d messages, %.0f%% of the VOD covered", len(data.messages), 100 * data.coverage.mean())
+        return data if data.coverage.any() else None
+    except Exception as e:
+        logger.warning("chat replay unavailable (%s) — continuing without chat signal", e)
+        return None
 
 
 def reaction_summary(messages: list[tuple[float, str]], start: float, end: float, top: int = 8) -> dict:

@@ -1,7 +1,7 @@
 """Kick discovery via the public JSON endpoints kick.com itself uses.
 
-Kick sits behind Cloudflare; installing the optional `curl_cffi` package (pip install
-'clipfactory[kick]') lets us present a real browser TLS fingerprint, which helps a lot.
+Kick sits behind Cloudflare; curl_cffi (installed via yt-dlp's curl-cffi extra) lets us
+present a real browser TLS fingerprint, which helps a lot.
 """
 
 from __future__ import annotations

@@ -13,9 +13,16 @@ def _even(v: float) -> int:
 
 
 def ff_escape(path: str | Path) -> str:
-    """Escape a path for use as a filter option value (handles Windows drive colons)."""
+    """Quote a path for use as a filter option value.
+
+    The quotes protect it from the filtergraph parser; the option parser then unescapes
+    the \\: so Windows drive letters (C:/...) survive. Apostrophes can't be expressed
+    inside the quotes, so keep project paths free of them.
+    """
     p = str(Path(path).resolve()).replace("\\", "/")
-    return p.replace(":", r"\:").replace("'", r"\'").replace(",", r"\,")
+    if "'" in p:
+        raise ValueError(f"path contains an apostrophe, which ffmpeg filters can't take: {p}")
+    return "'" + p.replace(":", r"\:") + "'"
 
 
 def blur_fill(zoom: float = 1.18) -> str:

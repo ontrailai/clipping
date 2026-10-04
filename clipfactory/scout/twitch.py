@@ -7,6 +7,8 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 
+import requests
+
 from ..http import session
 
 HELIX = "https://api.twitch.tv/helix"
@@ -89,16 +91,27 @@ class Twitch:
     def live_streams(self, user_ids: list[str]) -> dict[str, dict]:
         if not user_ids:
             return {}
-        data = self.get("streams", [("user_id", uid) for uid in user_ids[:100]])
+        data = self.get("streams", [("first", "100"), *[("user_id", uid) for uid in user_ids[:100]]])
         return {s["user_id"]: s for s in data.get("data", [])}
 
     def vods(self, user_id: str, first: int = 15) -> list[dict]:
         return self.get("videos", {"user_id": user_id, "type": "archive", "first": first}).get("data", [])
 
     def videos_by_id(self, ids: list[str]) -> list[dict]:
+        """Batch lookup; Helix 404s the whole batch if any id was deleted, so fall back to one by one."""
         out = []
         for i in range(0, len(ids), 100):
-            out.extend(self.get("videos", [("id", v) for v in ids[i : i + 100]]).get("data", []))
+            batch = ids[i : i + 100]
+            try:
+                out.extend(self.get("videos", [("id", v) for v in batch]).get("data", []))
+            except requests.HTTPError as e:
+                if e.response is None or e.response.status_code != 404:
+                    raise
+                for v in batch:
+                    try:
+                        out.extend(self.get("videos", {"id": v}).get("data", []))
+                    except requests.HTTPError:
+                        continue
         return out
 
     def clips(

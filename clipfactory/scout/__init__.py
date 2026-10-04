@@ -127,29 +127,44 @@ def _twitch(cfg: Config, db: DB) -> int:
         if not user:
             logger.warning("twitch user not found: %s", login)
             continue
-        for vod in tw.vods(user["id"]):
+        try:
+            vods = tw.vods(user["id"])
+        except Exception as e:
+            logger.warning("twitch %s: %s", login, e)
+            continue
+        for vod in vods:
             try:
                 found += consider(vod, creator.name)
             except Exception as e:
                 logger.warning("twitch vod %s: %s", vod.get("id"), e)
 
     if cfg["discovery"].get("twitch_category_scan") and game_ids:
-        open_policy = cfg["discovery"].get("creator_policy") == "open"
-        allowed_ids = {u["id"] for u in users.values()}
-        video_ids: set[str] = set()
-        for gid in game_ids.values():
-            for c in tw.clips(game_id=gid, started_at=cutoff, ended_at=datetime.now(timezone.utc), max_pages=2):
-                if c.get("video_id") and (open_policy or c["broadcaster_id"] in allowed_ids):
-                    video_ids.add(c["video_id"])
-        known = {r["external_id"] for r in db.all("SELECT external_id FROM sources WHERE platform='twitch'")}
-        for vod in tw.videos_by_id([v for v in video_ids if v not in known]):
-            creator = cfg.creator_for("twitch", vod["user_login"])
-            if creator is None and not open_policy:
-                continue
-            try:
-                found += consider(vod, creator.name if creator else vod["user_name"])
-            except Exception as e:
-                logger.warning("twitch vod %s: %s", vod.get("id"), e)
+        try:
+            found += _twitch_category_scan(cfg, db, tw, game_ids, users, consider, cutoff)
+        except Exception as e:
+            logger.warning("twitch category scan failed: %s", e)
+    return found
+
+
+def _twitch_category_scan(cfg, db, tw, game_ids, users, consider, cutoff) -> int:
+    """Top GTA clips across Twitch → their VODs (only for listed creators unless creator_policy: open)."""
+    found = 0
+    open_policy = cfg["discovery"].get("creator_policy") == "open"
+    allowed_ids = {u["id"] for u in users.values()}
+    video_ids: set[str] = set()
+    for gid in game_ids.values():
+        for c in tw.clips(game_id=gid, started_at=cutoff, ended_at=datetime.now(timezone.utc), max_pages=2):
+            if c.get("video_id") and (open_policy or c["broadcaster_id"] in allowed_ids):
+                video_ids.add(c["video_id"])
+    known = {r["external_id"] for r in db.all("SELECT external_id FROM sources WHERE platform='twitch'")}
+    for vod in tw.videos_by_id([v for v in video_ids if v not in known]):
+        creator = cfg.creator_for("twitch", vod["user_login"])
+        if creator is None and not open_policy:
+            continue
+        try:
+            found += consider(vod, creator.name if creator else vod["user_name"])
+        except Exception as e:
+            logger.warning("twitch vod %s: %s", vod.get("id"), e)
     return found
 
 
@@ -168,26 +183,32 @@ def _kick(cfg: Config, db: DB) -> int:
             except Exception:
                 clips = []
             for vod in vods:
-                if vod.get("is_live"):
-                    continue
-                created = parse_iso((vod.get("start_time") or vod.get("created_at") or "").replace(" ", "T"))
-                duration = (vod.get("duration") or 0) / 1000 or None
-                url = kick.vod_url(slug, vod)
-                if not url or created is None or created < cutoff or not _duration_ok(cfg, duration):
-                    continue
-                cats = kick.vod_categories(vod)
-                if not any(is_gta_category(c, cfg["games"]) for c in cats) and not title_matches(vod.get("session_title", ""), cfg["keywords"]):
-                    continue
-                mine = [c for c in clips if str(c.get("livestream_id")) == str(vod.get("id"))]
-                summaries = [kick.clip_summary(c, vod) for c in mine]
-                for s in summaries:
-                    s["is_gta"] = is_gta_category(s.get("game"), cfg["games"]) if s.get("game") else True
-                summaries = [s for s in summaries if s["offset"] is not None]
-                ext_id = (vod.get("video") or {}).get("uuid") or str(vod.get("id"))
-                sid = db.add_source("kick", ext_id, creator.name, vod.get("session_title", ""), url,
-                                    iso(created), duration, "vod",
-                                    {"community_clips": summaries, "categories": cats})
-                if sid:
-                    found += 1
-                    logger.info("new Kick VOD: %s — %s", creator.name, vod.get("session_title", ""))
+                try:
+                    found += _kick_vod(cfg, db, creator, slug, vod, clips, cutoff)
+                except Exception as e:
+                    logger.warning("kick vod %s: %s", vod.get("id"), e)
     return found
+
+
+def _kick_vod(cfg, db, creator, slug, vod, clips, cutoff) -> int:
+    if vod.get("is_live"):
+        return 0
+    created = parse_iso((vod.get("start_time") or vod.get("created_at") or "").replace(" ", "T"))
+    duration = (vod.get("duration") or 0) / 1000 or None
+    url = kick.vod_url(slug, vod)
+    if not url or created is None or created < cutoff or not _duration_ok(cfg, duration):
+        return 0
+    cats = kick.vod_categories(vod)
+    if not any(is_gta_category(c, cfg["games"]) for c in cats) and not title_matches(vod.get("session_title", ""), cfg["keywords"]):
+        return 0
+    mine = [c for c in clips if str(c.get("livestream_id")) == str(vod.get("id"))]
+    summaries = [kick.clip_summary(c, vod) for c in mine]
+    for s in summaries:
+        s["is_gta"] = is_gta_category(s.get("game"), cfg["games"]) if s.get("game") else True
+    summaries = [s for s in summaries if s["offset"] is not None]
+    ext_id = (vod.get("video") or {}).get("uuid") or str(vod.get("id"))
+    sid = db.add_source("kick", ext_id, creator.name, vod.get("session_title", ""), url,
+                        iso(created), duration, "vod", {"community_clips": summaries, "categories": cats})
+    if sid:
+        logger.info("new Kick VOD: %s — %s", creator.name, vod.get("session_title", ""))
+    return 1 if sid else 0

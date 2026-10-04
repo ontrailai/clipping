@@ -13,7 +13,9 @@
 #     If YouTube sources matter to you, run the factory on your own computer or a VPS instead.
 #
 # State (database + queued clips) is carried between runs with the Actions cache.
-# Tokens are written from secrets on every run and never cached.
+# Tokens are written from secrets on every run and never cached (this repo is public). That means a refreshed
+# TikTok token isn't saved; if TikTok ever rotates your refresh token, re-run `clipfactory auth tiktok` locally
+# and update TIKTOK_TOKEN_JSON.
 
 name: clip-factory
 

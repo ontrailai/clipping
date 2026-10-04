@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 from ..http import session
-from .base import PostResult, Publisher, PublishError
+from .base import AuthError, PostResult, Publisher, PublishError
 
 
 class InstagramPublisher(Publisher):
@@ -36,7 +36,11 @@ class InstagramPublisher(Publisher):
         except ValueError:
             data = {}
         if r.status_code >= 400 or "error" in data:
-            raise PublishError(f"instagram HTTP {r.status_code}: {data.get('error', r.text[:300])}")
+            err = data.get("error") or {}
+            msg = f"instagram HTTP {r.status_code}: {err or r.text[:300]}"
+            if r.status_code == 401 or (isinstance(err, dict) and err.get("code") in (190, 102)):
+                raise AuthError(msg + " — refresh IG_ACCESS_TOKEN (long-lived tokens last 60 days)")
+            raise PublishError(msg)
         return data
 
     def publish(self, clip: dict, copy: dict, slot_key: str) -> PostResult:

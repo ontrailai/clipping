@@ -107,8 +107,9 @@ platforms:
     share_to_feed: true
   tiktok:
     enabled: false
-    mode: direct             # direct = publish now; inbox = send to TikTok drafts for a 1-tap post
-    privacy: PUBLIC_TO_EVERYONE  # unaudited apps are forced to SELF_ONLY
+    mode: inbox              # inbox = send to your TikTok drafts for a 1-tap post; direct = publish automatically
+    audited: false           # set true once TikTok approves your app — until then direct posts are private
+    privacy: PUBLIC_TO_EVERYONE
 
 # ---------------------------------------------------------------- Claude
 llm:

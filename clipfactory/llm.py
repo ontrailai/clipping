@@ -113,4 +113,7 @@ class Claude:
             raise LLMError("Claude returned no text block")
         u = response.usage
         logger.debug("claude %s in=%s out=%s", response.model, u.input_tokens, u.output_tokens)
-        return json.loads(text)
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as e:
+            raise LLMError(f"Claude returned invalid JSON: {e}") from e

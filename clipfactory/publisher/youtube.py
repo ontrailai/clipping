@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from .base import PostResult, Publisher, PublishError
+from .base import AuthError, PostResult, Publisher, PublishError
 
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
 
@@ -51,10 +51,15 @@ class YouTubePublisher(Publisher):
         from google.oauth2.credentials import Credentials
         from googleapiclient.discovery import build
 
+        from google.auth.exceptions import RefreshError
+
         path = _token_path(self.cfg)
         creds = Credentials.from_authorized_user_file(str(path), SCOPES)
         if not creds.valid and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
+            try:
+                creds.refresh(Request())
+            except RefreshError as e:
+                raise AuthError(f"youtube login expired — run `clipfactory auth youtube` ({e})") from e
             path.write_text(creds.to_json())
         return build("youtube", "v3", credentials=creds, cache_discovery=False)
 
@@ -72,8 +77,15 @@ class YouTubePublisher(Publisher):
         }
         media = MediaFileUpload(clip["path"], mimetype="video/mp4", chunksize=8 * 1024 * 1024, resumable=True)
         request = self._service().videos().insert(part="snippet,status", body=body, media_body=media)
+        from googleapiclient.errors import HttpError
+
         response = None
-        while response is None:
-            _status, response = request.next_chunk()
+        try:
+            while response is None:
+                _status, response = request.next_chunk()
+        except HttpError as e:
+            if e.resp.status == 401:
+                raise AuthError("youtube login rejected — run `clipfactory auth youtube`") from e
+            raise PublishError(f"youtube upload failed: {e}") from e
         video_id = response["id"]
         return PostResult(remote_id=video_id, url=f"https://youtube.com/shorts/{video_id}")

@@ -69,7 +69,12 @@ def cmd_doctor(args) -> None:
         print(f"  {ok(True)} faster-whisper")
     except ImportError:
         print(f"  {ok(False)} faster-whisper (pip install faster-whisper)")
-    print(f"  {ok(shutil.which('TwitchDownloaderCLI'))} TwitchDownloaderCLI (optional, faster Twitch chat)")
+    from .fetch import js_runtimes
+
+    rts = js_runtimes()
+    hint = ", ".join(rts) or "install deno: pip install 'yt-dlp[deno]'"
+    print(f"  {ok(rts)} JavaScript runtime for YouTube ({hint})")
+    print(f"  {ok(shutil.which('TwitchDownloaderCLI'))} TwitchDownloaderCLI (optional, full Twitch chat)")
     fonts = list(cfg.fonts_dir.glob("*.ttf"))
     print(f"  {ok(fonts)} caption fonts ({len(fonts)} in {cfg.fonts_dir})")
 

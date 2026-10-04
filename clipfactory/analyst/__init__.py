@@ -43,9 +43,12 @@ def analyze_source(cfg: Config, db: DB, claude: Claude, source: dict) -> list[in
 
     try:
         info = fetch.probe(source["url"], opts)
-    except Exception as e:
-        db.update("sources", sid, status="failed", error=f"probe: {e}")
-        logger.warning("could not open %s: %s", source["url"], e)
+    except Exception as e:  # often transient ("try again later", rate limits): retry on later ticks
+        attempts = int(db.kv_get(f"probe_attempts:{sid}", "0")) + 1
+        db.kv_set(f"probe_attempts:{sid}", str(attempts))
+        logger.warning("could not open %s (attempt %d/3): %s", source["url"], attempts, e)
+        if attempts >= 3:
+            db.update("sources", sid, status="failed", error=f"probe: {e}"[:500])
         return []
     if info.get("live_status") in ("is_live", "is_upcoming", "post_live"):
         logger.info("still live/processing — will retry later")
@@ -66,10 +69,14 @@ def analyze_source(cfg: Config, db: DB, claude: Claude, source: dict) -> list[in
     if info.get("heatmap"):
         sigs["heatmap"] = signals.heatmap_signal(info["heatmap"], n)
     messages: list[tuple[float, str]] = []
+    coverage: dict[str, np.ndarray] = {}
     if source["platform"] == "twitch" and a["chat_replay"] != "off":
-        messages = chat.fetch_messages(source["external_id"], work, a["chat_replay"])
-        if messages:
-            sigs["chat"] = signals.chat_signal(chat.timeline(messages, n), a["chat_delay_seconds"])
+        chat_data = chat.fetch(source["external_id"], n, work, a["chat_replay"])
+        if chat_data:
+            messages = chat_data.messages
+            delay = int(a["chat_delay_seconds"])
+            sigs["chat"] = signals.chat_signal(chat_data.rate, delay)
+            coverage["chat"] = np.concatenate([chat_data.coverage[delay:], np.zeros(delay, dtype=bool)])
     try:
         audio_path = fetch.download_audio(source["url"], work / "audio", opts)
         sigs["audio"] = signals.audio_signal(audio.loudness_per_second(audio_path)[:n])
@@ -80,7 +87,7 @@ def analyze_source(cfg: Config, db: DB, claude: Claude, source: dict) -> list[in
     if not sigs:
         db.update("sources", sid, status="failed", error="no signals available")
         return []
-    score = signals.fuse(sigs, a["signal_weights"])
+    score = signals.fuse(sigs, a["signal_weights"], coverage)
     peaks = signals.pick_peaks(
         score, a["candidates_per_source"], a["window_seconds"],
         skip_start=a["skip_stream_start_seconds"] if source.get("kind") == "vod" else 0,

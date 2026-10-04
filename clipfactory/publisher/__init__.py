@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .base import PostResult, Publisher, PublishError
+from .base import AuthError, PostResult, Publisher, PublishError, PublishPending
 from .instagram import InstagramPublisher
 from .local import LocalPublisher
 from .tiktok import TikTokPublisher
@@ -20,4 +20,4 @@ def enabled(cfg) -> list[Publisher]:
     return [cls(cfg) for name, cls in REGISTRY.items() if cfg["platforms"].get(name, {}).get("enabled")]
 
 
-__all__ = ["PostResult", "Publisher", "PublishError", "REGISTRY", "enabled"]
+__all__ = ["AuthError", "PostResult", "Publisher", "PublishError", "PublishPending", "REGISTRY", "enabled"]

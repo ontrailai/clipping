@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,17 @@ from . import log
 logger = log.get("analyst")
 
 
+def js_runtimes() -> dict:
+    """YouTube needs a JavaScript runtime (deno ships with `yt-dlp[deno]`; node works too)."""
+    found = {}
+    venv_bin = Path(sys.executable).parent
+    for name in ("deno", "node"):
+        exe = shutil.which(name) or shutil.which(name, path=str(venv_bin))
+        if exe:
+            found[name] = {"path": exe}
+    return found
+
+
 def ytdlp_opts(cfg) -> dict:
     d = cfg["download"]
     opts: dict[str, Any] = {"quiet": True, "no_warnings": True, "noprogress": True, "retries": 5, "fragment_retries": 10}
@@ -23,12 +35,17 @@ def ytdlp_opts(cfg) -> dict:
         opts["cookiesfrombrowser"] = (d["cookies_from_browser"],)
     if d.get("cookiefile"):
         opts["cookiefile"] = d["cookiefile"]
+    runtimes = js_runtimes()
+    if runtimes:
+        opts["js_runtimes"] = runtimes
     return opts
 
 
 def probe(url: str, opts: dict | None = None, flat: bool = False) -> dict:
     o = dict(opts or {})
     o["skip_download"] = True
+    # premieres / scheduled streams: return info with live_status="is_upcoming" instead of raising
+    o["ignore_no_formats_error"] = True
     if flat:
         o["extract_flat"] = "in_playlist"
         o["playlistend"] = 5
@@ -64,9 +81,13 @@ def download_section(url: str, start: float, end: float, out_base: Path, opts: d
 
 
 def download_audio(url: str, out_base: Path, opts: dict | None = None) -> Path:
-    """Lowest-bitrate audio track (enough for loudness analysis of a multi-hour VOD)."""
+    """Original-language audio at the lowest bitrate (enough for loudness analysis of a multi-hour VOD).
+
+    Sorting by language first avoids YouTube's auto-dubbed / descriptive tracks, which "worstaudio" would pick.
+    """
     o = dict(opts or {})
-    o.update({"format": "worstaudio/bestaudio/worst", "outtmpl": str(out_base) + ".%(ext)s", "overwrites": True})
+    o.update({"format": "bestaudio/best", "format_sort": ["lang", "+abr"],
+              "outtmpl": str(out_base) + ".%(ext)s", "overwrites": True})
     out_base.parent.mkdir(parents=True, exist_ok=True)
     with yt_dlp.YoutubeDL(o) as ydl:
         ydl.download([url])

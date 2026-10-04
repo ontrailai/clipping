@@ -119,20 +119,29 @@ def game_mask(clips: list[dict], duration: int) -> np.ndarray | None:
 
 
 # ---------------------------------------------------------------------------- fusion + peaks
-def fuse(signals: dict[str, np.ndarray], weights: dict[str, float]) -> np.ndarray:
+def fuse(signals: dict[str, np.ndarray], weights: dict[str, float], coverage: dict[str, np.ndarray] | None = None) -> np.ndarray:
+    """Weighted average of the signals. A signal only counts (numerator and denominator) on the
+    seconds it covers, so partial chat coverage doesn't drag down the rest of the VOD."""
+    coverage = coverage or {}
     active = {k: v for k, v in signals.items() if v is not None and len(v) and v.max() > 0}
     if not active:
         n = max((len(v) for v in signals.values() if v is not None), default=0)
         return np.zeros(n)
     n = max(len(v) for v in active.values())
     total = np.zeros(n)
-    wsum = 0.0
+    wsum = np.zeros(n)
     for name, sig in active.items():
         w = weights.get(name, 0.2)
         padded = np.zeros(n)
         padded[: len(sig)] = sig
-        total += w * padded
-        wsum += w
+        mask = np.zeros(n)
+        cov = coverage.get(name)
+        if cov is None:
+            mask[: len(sig)] = 1.0
+        else:
+            mask[: min(n, len(cov))] = cov[:n].astype(float)
+        total += w * padded * mask
+        wsum += w * mask
     return total / (wsum + EPS)
 
 
