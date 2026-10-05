@@ -37,6 +37,9 @@ For keepers write:
 Curiosity plus accuracy — use the creator's name when it helps ("XQC GETS BETRAYED BY HIS OWN CREW"). \
 Never claim something that doesn't happen.
 - title: a short factual internal title.
+- hook_emphasis: the 1-3 word phrase inside hook_text that carries it (gets coloured), e.g. "COP CAR".
+- emphasis_words: 2-4 words actually spoken in the clip that carry the moment — names, the action, \
+the punchline. They get coloured in the captions.
 - what_happens: one or two factual sentences.
 - start/end: seconds on the candidate's LOCAL timeline (the transcript timestamps).
 
@@ -59,6 +62,8 @@ SCHEMA = {
                     "start": {"type": "number"},
                     "end": {"type": "number"},
                     "hook_text": {"type": "string"},
+                    "hook_emphasis": {"type": "string"},
+                    "emphasis_words": {"type": "array", "items": {"type": "string"}},
                     "title": {"type": "string"},
                     "what_happens": {"type": "string"},
                     "reason": {"type": "string"},
@@ -115,12 +120,31 @@ def build_content(source: dict, candidates: list[Candidate]) -> list[dict]:
     return content
 
 
-def judge(claude: Claude, cfg, source: dict, candidates: list[Candidate]) -> list[dict]:
+def taste_notes(cfg, feedback: list[dict] | None) -> str:
+    """House style + the owner's recent ratings, appended to the judge's instructions."""
+    out = []
+    if cfg.house_style:
+        out.append("House style from the page owner (follow it):\n" + cfg.house_style)
+    if feedback:
+        rows = []
+        for f in feedback:
+            mark = "LIKED" if f["rating"] == "good" else "DISLIKED"
+            note = f" — owner's note: {f['note']}" if f.get("note") else ""
+            rows.append(f"- {mark}: \"{f.get('hook') or ''}\" ({f.get('category')}, {f.get('creator')}, "
+                        f"{(f.get('duration') or 0):.0f}s, you scored it {f.get('score') or '?'}){note}")
+        out.append("The owner rated recent clips. Calibrate your picks, trims and scores to match:\n" + "\n".join(rows))
+    return "\n\n".join(out)
+
+
+def judge(claude: Claude, cfg, source: dict, candidates: list[Candidate], feedback: list[dict] | None = None) -> list[dict]:
     a = cfg["analysis"]
     system = SYSTEM.format(
         page_name=cfg["brand"]["page_name"], min_len=a["min_clip_seconds"],
         max_len=a["max_clip_seconds"], target_len=a["target_clip_seconds"],
     )
+    notes = taste_notes(cfg, feedback)
+    if notes:
+        system += "\n\n" + notes
     result = claude.json(system, build_content(source, candidates), SCHEMA, effort=cfg["llm"]["effort_judge"])
     by_id = {c.id: c for c in candidates}
     out = []

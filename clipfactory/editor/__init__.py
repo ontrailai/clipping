@@ -10,20 +10,16 @@ from .. import fetch, log
 from ..config import Config
 from ..db import DB, loads
 from ..llm import Claude
-from . import captions, facecam, layout
+from . import captions, facecam, layout, presets
 
 logger = log.get("editor")
 
 PLATFORM_NAMES = {"twitch": "Twitch", "kick": "Kick", "youtube": "YouTube"}
 
 
-def caption_style(cfg: Config) -> captions.Style:
+def caption_style(cfg: Config, preset: str | None = None) -> captions.Style:
     e = cfg["edit"]
-    return captions.Style(
-        font=e["caption_font"], size=e["caption_size"], color=e["caption_color"], highlight=e["caption_highlight"],
-        words_per_chunk=e["caption_words_per_chunk"], uppercase=e["caption_uppercase"],
-        hook_font=e["hook_font"], hook_size=e["hook_size"],
-    )
+    return presets.style_for(preset or e.get("preset", "punchy"), e.get("caption_overrides"))
 
 
 def render(
@@ -37,6 +33,9 @@ def render(
     credit: str | None,
     layout_name: str = "blur_fill",
     facecam_box: dict | None = None,
+    preset: str | None = None,
+    emphasis_words: list[str] | None = None,
+    hook_emphasis: str | None = None,
 ) -> Path:
     """Render one vertical clip from a local file. `words` are on the src timeline."""
     fetch.require_ffmpeg()
@@ -52,8 +51,9 @@ def render(
     ass_path = out.with_suffix(".ass")
     ass_path.write_text(
         captions.build_ass(
-            clip_words, duration, caption_style(cfg), captions.LAYOUT_POSITIONS[layout_name],
+            clip_words, duration, caption_style(cfg, preset), captions.LAYOUT_POSITIONS[layout_name],
             hook=hook, hook_seconds=e["hook_seconds"], credit=credit if e["credit"] else None,
+            emphasis_words=emphasis_words, hook_emphasis=hook_emphasis,
         ),
         encoding="utf-8",
     )
@@ -103,11 +103,17 @@ def render_moment(cfg: Config, db: DB, claude: Claude | None, moment: dict) -> i
     credit = f"{credit_name} • {PLATFORM_NAMES.get(source['platform'], source['platform'])}"
     stamp = datetime.now().strftime("%Y%m%d")
     out = cfg.path("out") / "clips" / f"{stamp}_{_slug(source['creator'])}_{moment['id']}_{_slug(moment['title'])}.mp4"
+    emphasis = loads(moment.get("emphasis"), {}) or {}
+    params = {
+        "layout": layout_name, "facecam": box, "preset": e.get("preset", "punchy"),
+        "start": moment["clip_start"], "end": moment["clip_end"], "hook": moment["hook"], "credit": credit,
+        "emphasis_words": emphasis.get("words") or [], "hook_emphasis": emphasis.get("hook"),
+    }
 
     logger.info("rendering #%s %s (%s, %.1fs)", moment["id"], moment["title"], layout_name,
                 moment["clip_end"] - moment["clip_start"])
     try:
-        render(cfg, local, moment["clip_start"], moment["clip_end"], words, out, moment["hook"], credit, layout_name, box)
+        _render_params(cfg, local, words, out, params)
         cover = fetch.extract_frame(out, (moment["clip_end"] - moment["clip_start"]) * 0.4, out.with_suffix(".jpg"), 1080)
     except Exception as ex:
         db.update("moments", moment["id"], status="failed", error=str(ex)[:500])
@@ -115,6 +121,38 @@ def render_moment(cfg: Config, db: DB, claude: Claude | None, moment: dict) -> i
         return None
 
     clip_id = db.add_clip(moment["id"], source["creator"], str(out), str(cover), fetch.media_duration(out), moment["score"] or 0)
+    db.update("clips", clip_id, render=params)
     db.update("moments", moment["id"], status="rendered")
-    local.unlink(missing_ok=True)
+    if not e.get("keep_source", True):
+        local.unlink(missing_ok=True)
     return clip_id
+
+
+def _render_params(cfg: Config, local: Path, words: list[dict], out: Path, p: dict) -> Path:
+    return render(cfg, local, p["start"], p["end"], words, out, p["hook"], p["credit"], p["layout"], p["facecam"],
+                  p["preset"], p.get("emphasis_words"), p.get("hook_emphasis"))
+
+
+def rerender(cfg: Config, db: DB, clip_id: int, out: Path | None = None, **changes) -> Path:
+    """Re-render an existing clip with tweaks — preset, start/end (seconds on the clip's source
+    window), hook, hook_emphasis, layout — without re-analysing anything. Saves the new params."""
+    clip = db.clip(clip_id)
+    if not clip:
+        raise ValueError(f"no clip #{clip_id}")
+    moment = db.one("SELECT * FROM moments WHERE id = ?", [clip["moment_id"]])
+    local = Path(moment["local_path"] or "")
+    if not local.exists():
+        raise RuntimeError("source footage for this clip was cleaned up — re-run `clipfactory clip` on the video")
+    params = loads(clip.get("render"), {}) or {}
+    for k, v in changes.items():
+        if v is not None:
+            params[k] = v
+    if params.get("preset"):
+        presets.style_for(params["preset"])  # validate early
+    target = out or Path(clip["path"])
+    _render_params(cfg, local, loads(moment["words"], []), target, params)
+    if out is None:
+        fetch.extract_frame(target, (params["end"] - params["start"]) * 0.4, target.with_suffix(".jpg"), 1080)
+        db.update("clips", clip_id, render=params, duration=fetch.media_duration(target))
+        db.update("moments", moment["id"], clip_start=params["start"], clip_end=params["end"], hook=params["hook"])
+    return target

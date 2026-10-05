@@ -8,7 +8,11 @@
   clipfactory produce [-n 3]       analyze + edit + QC until N new clips are ready
   clipfactory publish [--now]      post the due slot (or the next clip immediately)
   clipfactory status               queue, today's slots, recent posts
-  clipfactory clip URL             clip any YouTube / Twitch / Kick video right now (no posting)
+  clipfactory clip URL [URL...]    clip any YouTube / Twitch / Kick video right now (no posting)
+  clipfactory gallery              review page: every clip, the judge's reasoning, what got thrown out
+  clipfactory rate ID good|bad "note"   teach the judge your taste
+  clipfactory rerender ID ...      re-trim / new hook / new caption preset, no re-analysis
+  clipfactory styles ID            the same clip in every caption preset, side by side
   clipfactory render FILE ...      render a vertical clip from a local file (style test)
   clipfactory review | approve ID | reject ID
   clipfactory auth youtube|tiktok
@@ -40,10 +44,10 @@ def _producer(args):
 def cmd_init(args) -> None:
     home = project_home()
     (home / "config").mkdir(exist_ok=True)
-    for name in ("settings", "creators"):
-        dst = home / "config" / f"{name}.yaml"
+    for name, ext in (("settings", "yaml"), ("creators", "yaml"), ("style", "md")):
+        dst = home / "config" / f"{name}.{ext}"
         if not dst.exists():
-            shutil.copy(PACKAGE_ROOT / "config" / f"{name}.example.yaml", dst)
+            shutil.copy(PACKAGE_ROOT / "config" / f"{name}.example.{ext}", dst)
             print(f"created {dst.relative_to(home)}")
     env = home / ".env"
     if not env.exists():
@@ -178,16 +182,84 @@ def cmd_status(args) -> None:
 
 
 def cmd_clip(args) -> None:
-    from . import analyst
+    from . import analyst, gallery
 
     p = _producer(args)
-    sid = p.add_url(args.url, args.creator)
-    source = p.db.one("SELECT * FROM sources WHERE id = ?", [sid])
-    selected = analyst.analyze_source(p.cfg, p.db, p.claude, source)
-    for mid in selected[: args.n]:
-        p._render_and_finish(p.db.one("SELECT * FROM moments WHERE id = ?", [mid]))
-    for c in p.db.all("SELECT c.* FROM clips c JOIN moments m ON m.id = c.moment_id WHERE m.source_id = ?", [sid]):
-        print(f"#{c['id']} [{c['status']}] {c['path']}")
+    a = p.cfg.raw["analysis"]
+    a["max_clips_per_source"] = max(a["max_clips_per_source"], args.n)
+    if args.min_score is not None:
+        a["min_virality_score"] = args.min_score
+    for url in args.urls:
+        sid = p.add_url(url, args.creator)
+        source = p.db.one("SELECT * FROM sources WHERE id = ?", [sid])
+        selected = analyst.analyze_source(p.cfg, p.db, p.claude, source)
+        for mid in selected[: args.n]:
+            p._render_and_finish(p.db.one("SELECT * FROM moments WHERE id = ?", [mid]))
+        for c in p.db.all("SELECT c.* FROM clips c JOIN moments m ON m.id = c.moment_id WHERE m.source_id = ?", [sid]):
+            print(f"#{c['id']} [{c['status']}] {c['path']}")
+    page = gallery.build(p.db, p.cfg.path("out"))
+    print(f"\nreview them: {page}")
+
+
+def cmd_gallery(args) -> None:
+    import webbrowser
+
+    from . import gallery
+
+    p = _producer(args)
+    page = gallery.build(p.db, p.cfg.path("out"))
+    print(page)
+    if not args.no_open:
+        webbrowser.open(page.as_uri())
+
+
+def cmd_rate(args) -> None:
+    p = _producer(args)
+    if not p.db.clip(args.id):
+        sys.exit(f"no clip #{args.id}")
+    note = " ".join(args.note) or None
+    p.db.rate(args.id, args.rating, note)
+    print(f"clip #{args.id} rated {args.rating}" + (f": {note}" if note else "") + " — the judge will take this into account")
+
+
+def cmd_rerender(args) -> None:
+    from .db import loads
+    from .editor import rerender
+
+    p = _producer(args)
+    clip = p.db.clip(args.id)
+    if not clip:
+        sys.exit(f"no clip #{args.id}")
+    params = loads(clip.get("render"), {}) or {}
+    changes = {"preset": args.preset, "hook": args.hook, "hook_emphasis": args.hook_emphasis, "layout": args.layout}
+    if args.trim_start or args.trim_end:
+        changes["start"] = round(max(0.0, params.get("start", 0) + args.trim_start), 2)
+        changes["end"] = round(params.get("end", 0) + args.trim_end, 2)
+    print(rerender(p.cfg, p.db, args.id, **changes))
+
+
+def cmd_styles(args) -> None:
+    from .editor import presets, rerender
+    from .fetch import extract_frame, run_ffmpeg
+
+    p = _producer(args)
+    clip = p.db.clip(args.id)
+    if not clip:
+        sys.exit(f"no clip #{args.id}")
+    out_dir = p.cfg.path("out") / "styles"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    frames = []
+    names = list(presets.PRESETS)
+    for name in names:
+        video = rerender(p.cfg, p.db, args.id, out=out_dir / f"clip{args.id}_{name}.mp4", preset=name)
+        frames.append(extract_frame(video, args.at if args.at is not None else (clip["duration"] or 10) * 0.4,
+                                    out_dir / f"clip{args.id}_{name}.jpg", 360))
+        print(f"{name:>7}: {video}")
+    sheet = out_dir / f"clip{args.id}_compare.jpg"
+    inputs = [x for f in frames for x in ("-i", str(f))]
+    run_ffmpeg([*inputs, "-filter_complex", "".join(f"[{i}]" for i in range(len(frames))) + f"hstack=inputs={len(frames)}", str(sheet)])
+    print(f"side by side ({' | '.join(names)}): {sheet}")
+    print("pick one: set edit.preset in config/settings.yaml (or clipfactory rerender ID --preset NAME)")
 
 
 def cmd_render(args) -> None:
@@ -260,11 +332,33 @@ def main(argv: list[str] | None = None) -> None:
     pb.add_argument("--now", action="store_true", help="post the next approved clip immediately")
     pb.set_defaults(fn=cmd_publish)
     sub.add_parser("status").set_defaults(fn=cmd_status)
-    cl = sub.add_parser("clip")
-    cl.add_argument("url")
+    cl = sub.add_parser("clip", help="clip one or more video URLs now (no posting)")
+    cl.add_argument("urls", nargs="+", metavar="URL")
     cl.add_argument("--creator")
-    cl.add_argument("-n", type=int, default=2)
+    cl.add_argument("-n", type=int, default=3, help="max clips per video")
+    cl.add_argument("--min-score", type=int, help="override analysis.min_virality_score for this run")
     cl.set_defaults(fn=cmd_clip)
+    g = sub.add_parser("gallery", help="build and open the clip review page")
+    g.add_argument("--no-open", action="store_true")
+    g.set_defaults(fn=cmd_gallery)
+    rt = sub.add_parser("rate", help="rate a clip good/bad with a note — steers future picks")
+    rt.add_argument("id", type=int)
+    rt.add_argument("rating", choices=["good", "bad"])
+    rt.add_argument("note", nargs="*")
+    rt.set_defaults(fn=cmd_rate)
+    rr = sub.add_parser("rerender", help="re-render a clip with a new trim / hook / caption preset")
+    rr.add_argument("id", type=int)
+    rr.add_argument("--trim-start", type=float, default=0.0, help="seconds to move the start (+ later, - earlier)")
+    rr.add_argument("--trim-end", type=float, default=0.0, help="seconds to move the end (+ later, - earlier)")
+    rr.add_argument("--hook")
+    rr.add_argument("--hook-emphasis", help="phrase in the hook to colour")
+    rr.add_argument("--preset", help="punchy | boxed | loud | clean")
+    rr.add_argument("--layout", choices=["blur_fill", "facecam_split", "center_crop"])
+    rr.set_defaults(fn=cmd_rerender)
+    st = sub.add_parser("styles", help="render one clip in every caption preset, side by side")
+    st.add_argument("id", type=int)
+    st.add_argument("--at", type=float, help="second to grab for the comparison image")
+    st.set_defaults(fn=cmd_styles)
     r = sub.add_parser("render")
     r.add_argument("file")
     r.add_argument("--start", type=float, required=True)

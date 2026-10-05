@@ -86,7 +86,19 @@ CREATE TABLE IF NOT EXISTS kv (
   key TEXT PRIMARY KEY,
   value TEXT
 );
+CREATE TABLE IF NOT EXISTS feedback (
+  clip_id INTEGER PRIMARY KEY REFERENCES clips(id),
+  rating TEXT NOT NULL,     -- good | bad
+  note TEXT,
+  created_at TEXT NOT NULL
+);
 """
+
+# columns added after the first release: (table, column, type)
+MIGRATIONS = [
+    ("clips", "render", "TEXT"),      # JSON render params (layout, preset, trim, hook...) for re-renders
+    ("moments", "emphasis", "TEXT"),  # JSON {"words": [...], "hook": "..."} key words to colour
+]
 
 
 def utcnow() -> datetime:
@@ -111,6 +123,10 @@ class DB:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript(SCHEMA)
+        for table, column, kind in MIGRATIONS:
+            cols = {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+            if column not in cols:
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
         self.conn.commit()
 
     # ------------------------------------------------------------------ generic
@@ -200,6 +216,21 @@ class DB:
 
     def posts_for(self, clip_id: int) -> list[dict]:
         return self.all("SELECT * FROM posts WHERE clip_id = ?", [clip_id])
+
+    # ------------------------------------------------------------------ feedback
+    def rate(self, clip_id: int, rating: str, note: str | None = None) -> None:
+        self.execute(
+            "INSERT INTO feedback(clip_id, rating, note, created_at) VALUES(?,?,?,?)"
+            " ON CONFLICT(clip_id) DO UPDATE SET rating=excluded.rating, note=excluded.note, created_at=excluded.created_at",
+            [clip_id, rating, note, iso()],
+        )
+
+    def recent_feedback(self, limit: int = 12) -> list[dict]:
+        return self.all(
+            "SELECT f.rating, f.note, m.hook, m.category, m.summary, m.score, c.duration, s.creator"
+            " FROM feedback f JOIN clips c ON c.id = f.clip_id JOIN moments m ON m.id = c.moment_id"
+            " JOIN sources s ON s.id = m.source_id ORDER BY f.created_at DESC LIMIT ?", [limit],
+        )
 
     # ------------------------------------------------------------------ slots
     def slot_filled(self, slot_key: str) -> bool:

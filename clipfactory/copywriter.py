@@ -94,6 +94,8 @@ def write_copy(claude: Claude, cfg, moment: dict, source: dict, credit: str, tra
     brand = cfg["brand"]
     n_specific = max(3, brand["hashtags_max"] - len(brand["base_hashtags"]))
     system = SYSTEM.format(page_name=brand["page_name"], n_specific=n_specific)
+    if cfg.house_style:
+        system += "\n\nHouse style from the page owner (follow it):\n" + cfg.house_style
     prompt = (
         f"Creator: {source['creator']} (credit as {credit}) on {PLATFORM_NAMES.get(source['platform'], source['platform'])}\n"
         f"Moment type: {moment.get('category')}\n"

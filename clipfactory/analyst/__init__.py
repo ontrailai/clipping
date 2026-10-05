@@ -132,7 +132,7 @@ def analyze_source(cfg: Config, db: DB, claude: Claude, source: dict) -> list[in
 
     # ---- the judge decides
     try:
-        verdicts = judge.judge(claude, cfg, source, candidates)
+        verdicts = judge.judge(claude, cfg, source, candidates, db.recent_feedback())
     except LLMError as e:
         attempts = int(db.kv_get(f"judge_attempts:{sid}", "0")) + 1
         db.kv_set(f"judge_attempts:{sid}", str(attempts))
@@ -147,6 +147,7 @@ def analyze_source(cfg: Config, db: DB, claude: Claude, source: dict) -> list[in
         db.update("moments", v["candidate_id"], clip_start=v["start"], clip_end=v["end"], score=v["virality_score"],
                   category=v["category"], hook=v["hook_text"], title=v["title"], summary=v["what_happens"],
                   reason=v["reason"], status=status,
+                  emphasis={"words": v.get("emphasis_words") or [], "hook": v.get("hook_emphasis") or None},
                   error=",".join(v["content_flags"]) or None)
         if status == "selected":
             keepers.append(v)

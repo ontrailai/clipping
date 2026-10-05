@@ -93,6 +93,17 @@ class Config:
         local = self.home / "assets" / "fonts"
         return local if local.exists() else PACKAGE_ROOT / "assets" / "fonts"
 
+    @property
+    def house_style(self) -> str:
+        """config/style.md — plain-English taste rules fed to the judge and copywriter."""
+        path = self.home / "config" / "style.md"
+        if not path.exists():
+            path = _example("style.example.md")
+        if not path.exists():
+            return ""
+        lines = [ln for ln in path.read_text(encoding="utf-8").splitlines() if not ln.startswith("# ")]
+        return "\n".join(lines).strip()
+
     def creator(self, name: str) -> Creator | None:
         for c in self.creators:
             if c.name.lower() == name.lower():

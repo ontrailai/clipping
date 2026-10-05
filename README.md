@@ -33,20 +33,47 @@ Instagram Reels and YouTube Shorts. Hands-off once it's set up.
 You need Python 3.10+ and ffmpeg (`brew install ffmpeg` · `sudo apt install ffmpeg` · `winget install ffmpeg`).
 
 ```bash
-git clone https://github.com/ontrailai/clipping && cd clipping
+git clone -b claude/gta6-clipping-engine-8kczpt https://github.com/ontrailai/clipping && cd clipping
 python3 -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -e ".[all]"
-clipfactory init          # creates config/settings.yaml, config/creators.yaml, .env
+clipfactory init          # creates config/settings.yaml, creators.yaml, style.md and .env
 ```
 
 1. Put your keys in `.env`: at minimum `ANTHROPIC_API_KEY`, plus `TWITCH_CLIENT_ID`/`TWITCH_CLIENT_SECRET` ([free app](https://dev.twitch.tv/console/apps)).
 2. Edit `config/creators.yaml` (who to clip) and `config/settings.yaml` (timezone, post times, brand name, hashtags).
 3. `clipfactory doctor` → everything green?
-4. **Try it on one video:** `clipfactory clip "https://www.twitch.tv/videos/…"` → clips land in `out/clips/`.
+4. **Try it on one video:** `clipfactory clip "https://www.twitch.tv/videos/…"` → clips land in `out/clips/`,
+   then `clipfactory gallery` to review them.
 5. Turn on platforms in `settings.yaml` (see below), then run it for real: `clipfactory daemon`.
 
 Until a platform is enabled, every clip is still saved to `out/ready/<slot>_<creator>_<id>/`
 (video, cover, captions), so you can post by hand while the API approvals come through.
+
+## Tuning the clips (do this first)
+
+The loop: **make a batch → watch → rate → tweak → repeat**, until every clip is one you'd post.
+
+```bash
+clipfactory clip URL1 URL2 URL3 -n 4      # clip a few GTA VODs/videos, up to 4 clips each
+clipfactory gallery                       # review page: video, hook, captions, why the judge picked it, what it threw out
+clipfactory rate 12 good "perfect length, great hook"
+clipfactory rate 13 bad "starts too early, nothing happens for 8s"
+clipfactory rerender 13 --trim-start 6 --hook "BUDDHA GETS ROBBED BY HIS OWN CREW"
+clipfactory styles 12                     # same clip in every caption preset, side by side
+```
+
+What each knob does:
+
+| Want to change… | Do this |
+|---|---|
+| Which moments get picked, hook tone, pacing taste | Edit `config/style.md` (plain English; Claude reads it every run) and rate clips. The judge sees your last 12 ratings and notes. |
+| How picky it is | `analysis.min_virality_score` (default 65), or `clip --min-score 75` for one run |
+| Clip length | `analysis.target_clip_seconds` / `min_clip_seconds` / `max_clip_seconds` |
+| Caption look | `edit.preset`: `punchy` · `boxed` · `loud` · `clean`; fine-tune with `edit.caption_overrides` (colours, size, words per chunk…) |
+| One specific clip | `clipfactory rerender ID` with `--trim-start/--trim-end` (seconds, ±), `--hook`, `--hook-emphasis`, `--preset`, `--layout` |
+| Facecam framing for a creator | `facecam: {x, y, w, h}` on that creator in `creators.yaml` (fractions of the frame) |
+
+Source footage is kept for `keep_files_days` (default 4), so re-renders don't download anything again.
 
 ## Connecting the platforms
 

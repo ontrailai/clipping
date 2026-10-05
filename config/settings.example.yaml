@@ -65,17 +65,12 @@ edit:
   gameplay_zoom: 1.18        # blur_fill: enlarge gameplay a bit past full width
   fps: 30
   crf: 20
-  caption_font: Montserrat Black
-  caption_size: 92
-  caption_words_per_chunk: 3
-  caption_uppercase: true
-  caption_color: "#FFFFFF"
-  caption_highlight: "#FFE400"
-  hook_font: Montserrat Black
-  hook_size: 64
+  preset: punchy             # caption look: punchy | boxed | loud | clean  (compare: clipfactory styles <clip id>)
+  caption_overrides: {}      # fine-tune any preset field, e.g. {highlight: "#00E5FF", size: 96, words_per_chunk: 2}
   hook_seconds: 0            # 0 = keep the hook banner on screen for the whole clip
   credit: true               # small "xQc • Kick" credit on screen
   target_lufs: -14
+  keep_source: true          # keep each clip's source footage (until keep_files_days) so you can re-render/re-trim
 
 # ---------------------------------------------------------------- Copywriter
 brand:
